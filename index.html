@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Real Continent Country Quiz</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    body { margin: 0; background: #f6f7fb; color: #111; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 18px; display: grid; gap: 14px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    h1 { font-size: 20px; margin: 0; }
+    .pill { background: white; border: 1px solid #e6e8f0; border-radius: 999px; padding: 8px 12px; display: flex; gap: 12px; align-items: center; }
+    .pill b { font-variant-numeric: tabular-nums; }
+    .card { background: white; border: 1px solid #e6e8f0; border-radius: 16px; padding: 14px; box-shadow: 0 4px 18px rgba(0,0,0,.05); }
+    .grid { display: grid; grid-template-columns: 1.35fr .65fr; gap: 14px; }
+    @media (max-width: 900px){ .grid { grid-template-columns: 1fr; } }
+    .prompt { font-size: 16px; margin: 0 0 10px; }
+    .btns { display: grid; gap: 10px; }
+    button {
+      appearance: none; border: 1px solid #dde1ee; background: #fbfcff;
+      border-radius: 12px; padding: 12px 12px; font-size: 16px; cursor: pointer;
+      transition: transform .03s ease, background .15s ease, border-color .15s ease;
+      text-align: left;
+    }
+    button:hover { background: #f2f6ff; }
+    button:active { transform: translateY(1px); }
+    button[disabled] { cursor: not-allowed; opacity: .75; }
+    .good { border-color: #31c48d !important; background: #ecfdf5 !important; }
+    .bad  { border-color: #f98080 !important; background: #fef2f2 !important; }
+    .msg { margin: 10px 0 0; font-size: 15px; min-height: 22px; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+    .primary { background: #111; color: white; border-color: #111; }
+    .primary:hover { background: #222; }
+    .small { font-size: 13px; opacity: .8; }
+
+    /* map */
+    .mapWrap { display: grid; place-items: center; }
+    svg { width: 100%; height: auto; max-height: 580px; }
+    .country { fill: #e9ecf5; stroke: #c7cbe0; stroke-width: 0.8; vector-effect: non-scaling-stroke; }
+    .highlight { fill: #ffd54a; stroke: #b08900; stroke-width: 1.2; }
+    .label { font-weight: 800; font-size: 18px; }
+    .loading { padding: 24px; text-align: center; }
+  </style>
+
+  <!-- D3 for projections + drawing -->
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Real Continent Country Quiz</h1>
+      <div class="pill">
+        <span>Score: <b id="score">0</b></span>
+        <span>Question: <b id="qnum">1</b></span>
+      </div>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <div class="mapWrap" id="mapHost">
+          <div class="loading" id="loading">Loading real map data…</div>
+        </div>
+        <div class="small" style="margin-top:8px;">
+          Data: Natural Earth country boundaries (via GeoJSON mirror). If you want higher detail later (50m/10m), we can swap it.
+        </div>
+      </div>
+
+      <div class="card">
+        <p class="prompt" id="prompt">Which country is highlighted?</p>
+        <div class="btns" id="choices"></div>
+        <p class="msg" id="msg"></p>
+        <div class="actions">
+          <button id="skipBtn" type="button">Skip</button>
+          <button class="primary" id="nextBtn" type="button" disabled>Next</button>
+          <button id="resetBtn" type="button">Reset Score</button>
+        </div>
+        <p class="small">
+          Note: Natural Earth shows “de facto” boundaries in some disputed areas.
+        </p>
+      </div>
+    </div>
+  </div>
+
+<script>
+/**
+ * Real countries GeoJSON (Natural Earth 110m) mirrored as GeoJSON.
+ * Source commonly used: martynafford/natural-earth-geojson.
+ * (If you want offline play, download this file and point URL to a local copy.)
+ */
+const GEOJSON_URL =
+  "https://raw.githubusercontent.com/martynafford/natural-earth-geojson/master/110m/cultural/ne_110m_admin_0_countries.json";
+
+let WORLD = null; // FeatureCollection
+let score = 0, qnum = 1;
+let locked = false;
+
+let current = null; // { continentName, features[], answerFeature, options[] }
+
+const elScore = document.getElementById("score");
+const elQnum  = document.getElementById("qnum");
+const elPrompt = document.getElementById("prompt");
+const elChoices = document.getElementById("choices");
+const elMsg = document.getElementById("msg");
+const elNext = document.getElementById("nextBtn");
+const elSkip = document.getElementById("skipBtn");
+const elReset = document.getElementById("resetBtn");
+const mapHost = document.getElementById("mapHost");
+const loading = document.getElementById("loading");
+
+function randInt(n){ return Math.floor(Math.random() * n); }
+function shuffle(arr){
+  const a = arr.slice();
+  for (let i=a.length-1; i>0; i--){
+    const j = randInt(i+1);
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+function pick(arr){ return arr[randInt(arr.length)]; }
+
+function countryName(f){
+  // Natural Earth uses lots of name fields; prefer NAME_LONG, fallback NAME.
+  return (f.properties.NAME_LONG || f.properties.NAME || "Unknown");
+}
+
+function continentName(f){
+  return (f.properties.CONTINENT || "Other");
+}
+
+function isGoodCountryFeature(f){
+  // Filter out weird placeholders
+  const nm = countryName(f);
+  const cont = continentName(f);
+  if (!nm || nm === "Unknown") return false;
+  if (cont === "Antarctica") return false; // skip for kid quiz
+  return true;
+}
+
+function buildContinentIndex(features){
+  const byCont = new Map();
+  for (const f of features){
+    const c = continentName(f);
+    if (!byCont.has(c)) byCont.set(c, []);
+    byCont.get(c).push(f);
+  }
+  // Keep only continents with enough distinct answers
+  // (need at least 4 so we can make 1 correct + 3 wrong)
+  const ok = [];
+  for (const [c, list] of byCont.entries()){
+    if (list.length >= 4) ok.push([c, list]);
+  }
+  return ok;
+}
+
+let svg, g, path, projection;
+
+function ensureSVG(){
+  if (svg) return;
+  svg = d3.select(mapHost).append("svg")
+    .attr("viewBox", "0 0 900 600")
+    .attr("role", "img")
+    .attr("aria-label", "Map");
+
+  g = svg.append("g");
+}
+
+function renderMap(){
+  ensureSVG();
+  g.selectAll("*").remove();
+
+  const W = 900, H = 600;
+  const fc = { type:"FeatureCollection", features: current.features };
+
+  projection = d3.geoNaturalEarth1();
+  projection.fitSize([W, H], fc);
+  path = d3.geoPath(projection);
+
+  // draw all countries in the continent
+  g.selectAll("path.country")
+    .data(current.features)
+    .enter()
+    .append("path")
+    .attr("class", d => d === current.answerFeature ? "country highlight" : "country")
+    .attr("d", path);
+
+  // label
+  g.append("text")
+    .attr("x", 14)
+    .attr("y", 28)
+    .attr("class", "label")
+    .text(current.continentName);
+}
+
+function newQuestion(){
+  locked = false;
+  elMsg.textContent = "";
+  elNext.disabled = true;
+  elChoices.innerHTML = "";
+
+  const good = WORLD.features.filter(isGoodCountryFeature);
+  const continents = buildContinentIndex(good);
+
+  const [cont, features] = pick(continents);
+
+  const answerFeature = pick(features);
+  const others = features.filter(f => f !== answerFeature);
+  const wrongs = shuffle(others).slice(0, 3);
+
+  const options = shuffle([answerFeature, ...wrongs]);
+
+  current = { continentName: cont, features, answerFeature, options };
+
+  elScore.textContent = String(score);
+  elQnum.textContent = String(qnum);
+  elPrompt.textContent = `Continent: ${cont}. Which country is highlighted?`;
+
+  renderMap();
+
+  // build buttons
+  current.options.forEach((f) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = countryName(f);
+    b.addEventListener("click", () => choose(f, b));
+    elChoices.appendChild(b);
+  });
+}
+
+function choose(chosenFeature, btnEl){
+  if (locked) return;
+  locked = true;
+
+  const correct = current.answerFeature;
+
+  // disable + mark
+  [...elChoices.querySelectorAll("button")].forEach(b => {
+    const t = b.textContent;
+    const isCorrect = (t === countryName(correct));
+    if (isCorrect) b.classList.add("good");
+    if (b === btnEl && chosenFeature !== correct) b.classList.add("bad");
+    b.disabled = true;
+  });
+
+  if (chosenFeature === correct){
+    score += 1;
+    elMsg.textContent = "✅ Correct!";
+  } else {
+    elMsg.textContent = `❌ Not quite — that was ${countryName(correct)}.`;
+  }
+
+  elScore.textContent = String(score);
+  elNext.disabled = false;
+
+  // re-render so highlight remains crisp even if projection changes later
+  renderMap();
+}
+
+elNext.addEventListener("click", () => { qnum += 1; newQuestion(); });
+elSkip.addEventListener("click", () => { qnum += 1; newQuestion(); });
+elReset.addEventListener("click", () => { score = 0; qnum = 1; newQuestion(); });
+
+// load data
+(async function init(){
+  try{
+    const data = await d3.json(GEOJSON_URL);
+    WORLD = data;
+    if (loading) loading.remove();
+    newQuestion();
+  } catch (e){
+    if (loading) loading.textContent =
+      "Could not load map data (maybe no internet / blocked). If you want, I can show you how to bundle the GeoJSON locally for offline play.";
+    console.error(e);
+  }
+})();
+</script>
+</body>
+</html>
